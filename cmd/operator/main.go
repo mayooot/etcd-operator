@@ -18,6 +18,9 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"net/http"
 	"os"
 	"runtime"
@@ -31,8 +34,6 @@ import (
 	"github.com/coreos/etcd-operator/pkg/util/probe"
 	"github.com/coreos/etcd-operator/pkg/util/retryutil"
 	"github.com/coreos/etcd-operator/version"
-	"github.com/prometheus/client_golang/prometheus"
-
 	"github.com/sirupsen/logrus"
 	"golang.org/x/time/rate"
 	v1 "k8s.io/api/core/v1"
@@ -42,7 +43,6 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/leaderelection"
-	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/client-go/tools/record"
 )
 
@@ -103,17 +103,30 @@ func main() {
 	kubecli := k8sutil.MustNewKubeClient()
 
 	http.HandleFunc(probe.HTTPReadyzEndpoint, probe.ReadyzHandler)
-	http.Handle("/metrics", prometheus.Handler())
+	reg := prometheus.NewRegistry()
+	http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}))
 	go http.ListenAndServe(listenAddr, nil)
 
-	rl, err := resourcelock.New(resourcelock.EndpointsResourceLock,
+	rl, err := resourcelock.New(resourcelock.EndpointsLeasesResourceLock,
 		namespace,
 		"etcd-operator",
 		kubecli.CoreV1(),
+		kubecli.CoordinationV1(),
 		resourcelock.ResourceLockConfig{
 			Identity:      id,
 			EventRecorder: createRecorder(kubecli, name, namespace),
 		})
+	//rl, err := resourcelock.New(
+	//	resourcelock.EndpointsLeasesResourceLock,
+	//	namespace,
+	//	"123",
+	//	kubecli.CoreV1(),
+	//	kubecli.CoordinationV1(),
+	//	resourcelock.ResourceLockConfig{
+	//		Identity:      id,
+	//		EventRecorder: createRecorder(kubecli, name, namespace),
+	//	},
+	//)
 	if err != nil {
 		logrus.Fatalf("error creating lock: %v", err)
 	}
@@ -173,7 +186,7 @@ func newControllerConfig() controller.Config {
 func getMyPodServiceAccount(kubecli kubernetes.Interface) (string, error) {
 	var sa string
 	err := retryutil.Retry(5*time.Second, 100, func() (bool, error) {
-		pod, err := kubecli.CoreV1().Pods(namespace).Get(name, metav1.GetOptions{})
+		pod, err := kubecli.CoreV1().Pods(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 		if err != nil {
 			logrus.Errorf("fail to get operator pod (%s): %v", name, err)
 			return false, nil
@@ -224,6 +237,6 @@ func startChaos(ctx context.Context, kubecli kubernetes.Interface, ns string, ch
 func createRecorder(kubecli kubernetes.Interface, name, namespace string) record.EventRecorder {
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartLogging(logrus.Infof)
-	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: v1core.New(kubecli.Core().RESTClient()).Events(namespace)})
+	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: v1core.New(kubecli.CoreV1().RESTClient()).Events(namespace)})
 	return eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: name})
 }
